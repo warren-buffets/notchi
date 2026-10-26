@@ -288,6 +288,12 @@ struct UsageDetailView: View {
             costDashboard
                 .padding(.bottom, showGrassIsland ? -4 : 2)
 
+            if resolvedTab == .provider(.claude), CostHistoryStore.claudeHistoryIsShared, secondaryUsage != nil {
+                Text(String(localized: "Historique combiné des deux comptes"))
+                    .panelFont(size: 11)
+                    .foregroundColor(TerminalColors.dimmedText)
+            }
+
             if resolvedTab != .all {
                 if Self.usesTwoColumnLayout(
                     rowCount: usageRowCount,

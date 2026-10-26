@@ -147,8 +147,17 @@ extension CostHistoryStore {
         provider: .claude, config: .claude,
         projectsRoots: [homeURL(".claude/projects")], cacheFile: "claude.json")
 
-    /// Second Claude account's history, nil when no secondary config dir is found.
-    static let sharedSecondary: CostHistoryStore? = KeychainManager.secondaryClaudeConfigDir().map {
+    /// True when the secondary config dir shares its projects folder with the primary (symlink):
+    /// transcripts carry no account marker, so the primary store already holds both accounts.
+    static let claudeHistoryIsShared: Bool = {
+        guard let dir = KeychainManager.secondaryClaudeConfigDir() else { return false }
+        let secondary = dir.appendingPathComponent("projects", isDirectory: true).resolvingSymlinksInPath().standardizedFileURL
+        let primary = homeURL(".claude/projects").resolvingSymlinksInPath().standardizedFileURL
+        return secondary.path == primary.path
+    }()
+
+    /// Second Claude account's history, nil when no secondary config dir is found or its history is shared.
+    static let sharedSecondary: CostHistoryStore? = claudeHistoryIsShared ? nil : KeychainManager.secondaryClaudeConfigDir().map {
         makeStore(provider: .claude, config: .claude,
                   projectsRoots: [$0.appendingPathComponent("projects", isDirectory: true)],
                   cacheFile: "claude-secondary.json")
