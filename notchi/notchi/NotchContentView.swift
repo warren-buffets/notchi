@@ -509,6 +509,15 @@ struct NotchContentView: View {
         return provider == .codex && codexHasUnlimitedCredits && !hasCodexQuota ? .unlimited : nil
     }
 
+    /// Second compte Claude, affiché en anneau intérieur quand il existe.
+
+    private var secondaryRingUsage: (percentage: Int, isStale: Bool)? {
+        guard ringProvider == .claude, AppSettings.isUsageEnabled,
+              let secondary = ClaudeUsageService.secondary,
+              let usage = secondary.currentUsage else { return nil }
+        return (usage.usagePercentage, secondary.isUsageStale)
+    }
+
     private var collapsedRingContent: CollapsedRingContent? {
         Self.collapsedRingContent(
             isUsageEnabled: AppSettings.isUsageEnabled,
@@ -523,7 +532,7 @@ struct NotchContentView: View {
     }
 
     private var isCollapsedRingVisible: Bool {
-        (leftContent == .ring || rightContent == .ring) && collapsedRingContent != nil
+        (leftContent == .ring || rightContent == .ring) && (collapsedRingContent != nil || secondaryRingUsage != nil)
     }
 
     private var compactContentWidth: CGFloat {
@@ -897,8 +906,16 @@ struct NotchContentView: View {
 
     @ViewBuilder
     private func ringSlot(side: NotchSide) -> some View {
-        if let collapsedRingContent, !isLaunchWaveActive {
-            UsageRingView(content: collapsedRingContent, isStale: ringIsStale)
+        if collapsedRingContent != nil || secondaryRingUsage != nil, !isLaunchWaveActive {
+            let isConcentric = collapsedRingContent != nil && secondaryRingUsage != nil
+            UsageRingView(
+                content: collapsedRingContent ?? .percentage(secondaryRingUsage?.percentage ?? 0),
+                // Concentrique : trait compris l'anneau fait diameter + 3, marge de 4 pt haut et bas + décalage Y de 2.
+                diameter: isConcentric ? min(21, notchSize.height - 13) : 15,
+                isStale: collapsedRingContent == nil ? (secondaryRingUsage?.isStale ?? false) : ringIsStale,
+                inner: collapsedRingContent == nil ? nil : secondaryRingUsage.map { .percentage($0.percentage) },
+                innerIsStale: secondaryRingUsage?.isStale ?? false
+            )
                 .opacity(collapsedHeaderSpriteVisuals.opacity)
                 .animation(collapsedHeaderSpriteVisibilityAnimation, value: isExpanded)
                 .frame(width: sideWidth)

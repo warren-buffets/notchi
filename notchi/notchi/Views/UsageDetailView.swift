@@ -8,9 +8,12 @@ struct UsageDetailView: View {
     let codexCostStore: CostHistoryStore
     let devinCostStore: CostHistoryStore
     let defaultProvider: AgentProvider
+    private let secondaryService: ClaudeUsageService?
+    private let secondaryCostStore: CostHistoryStore?
 
     enum UsageTab: Hashable {
         case provider(AgentProvider)
+        case claudeSecondary
         case all
     }
 
@@ -25,7 +28,9 @@ struct UsageDetailView: View {
         costStore: CostHistoryStore,
         codexCostStore: CostHistoryStore,
         devinCostStore: CostHistoryStore,
-        defaultProvider: AgentProvider
+        defaultProvider: AgentProvider,
+        secondaryUsage: ClaudeUsageService? = ClaudeUsageService.secondary,
+        secondaryCostStore: CostHistoryStore? = CostHistoryStore.sharedSecondary
     ) {
         self.claudeUsage = claudeUsage
         self.codexUsage = codexUsage
@@ -34,7 +39,17 @@ struct UsageDetailView: View {
         self.codexCostStore = codexCostStore
         self.devinCostStore = devinCostStore
         self.defaultProvider = defaultProvider
+        self.secondaryService = secondaryUsage
+        self.secondaryCostStore = secondaryCostStore
         _selectedTab = State(initialValue: .provider(defaultProvider))
+    }
+
+    private var secondaryUsage: ClaudeUsageService? {
+        secondaryService.flatMap { $0.hasUsageData ? $0 : nil }
+    }
+
+    private var hasSecondaryCosts: Bool {
+        !(secondaryCostStore?.buckets.isEmpty ?? true)
     }
 
     var claudeHasData: Bool {
@@ -58,19 +73,28 @@ struct UsageDetailView: View {
     }
 
     var showsToggle: Bool {
-        providersWithData.count > 1
+        tabs.count > 1
     }
 
     private var showsAllTab: Bool {
-        costStoresByProvider.filter { !$0.store.buckets.isEmpty }.count > 1
+        costStoresByProvider.filter { !$0.store.buckets.isEmpty }.count + (hasSecondaryCosts ? 1 : 0) > 1
     }
 
     var tabs: [UsageTab] {
-        providersWithData.map(UsageTab.provider) + (showsAllTab ? [.all] : [])
+        var result = providersWithData.map(UsageTab.provider)
+        if secondaryUsage != nil || hasSecondaryCosts {
+            let index = result.firstIndex(of: .provider(.claude)).map { $0 + 1 } ?? 0
+            result.insert(.claudeSecondary, at: index)
+        }
+        return result + (showsAllTab ? [.all] : [])
     }
 
     private var resolvedTab: UsageTab {
         switch selectedTab {
+        case .claudeSecondary where tabs.contains(.claudeSecondary):
+            return .claudeSecondary
+        case .claudeSecondary:
+            return .provider(.claude)
         case .all where showsAllTab:
             return .all
         case .all:
@@ -93,6 +117,7 @@ struct UsageDetailView: View {
     private var resolvedProvider: AgentProvider {
         switch resolvedTab {
         case .provider(let provider): provider
+        case .claudeSecondary: .claude
         case .all: defaultProvider
         }
     }
@@ -119,14 +144,15 @@ struct UsageDetailView: View {
     private var periods: [UsagePeriodDisplay] {
         switch resolvedProvider {
         case .claude:
-            let stale = claudeUsage.isUsageStale
-            let heldOver = claudeUsage.isWeeklyUsageHeldOver
+            let service = resolvedTab == .claudeSecondary ? (secondaryUsage ?? claudeUsage) : claudeUsage
+            let stale = service.isUsageStale
+            let heldOver = service.isWeeklyUsageHeldOver
             return [
-                UsageMetrics.periodDisplay(title: String(localized: "Session"), usage: claudeUsage.currentUsage, isStale: stale),
-                UsageMetrics.periodDisplay(title: String(localized: "Weekly"), usage: claudeUsage.currentWeeklyUsage, isStale: heldOver),
+                UsageMetrics.periodDisplay(title: String(localized: "Session"), usage: service.currentUsage, isStale: stale),
+                UsageMetrics.periodDisplay(title: String(localized: "Weekly"), usage: service.currentWeeklyUsage, isStale: heldOver),
                 UsageMetrics.periodDisplay(
-                    title: claudeUsage.currentModelUsageName ?? String(localized: "Model"),
-                    usage: claudeUsage.currentModelUsage,
+                    title: service.currentModelUsageName ?? String(localized: "Model"),
+                    usage: service.currentModelUsage,
                     isStale: heldOver
                 ),
             ].compactMap { $0 }
@@ -151,7 +177,8 @@ struct UsageDetailView: View {
 
     private var extraUsage: ExtraUsageDisplay? {
         resolvedProvider == .claude
-            ? UsageMetrics.extraUsageDisplay(claudeUsage.currentExtraUsage)
+            ? UsageMetrics.extraUsageDisplay(
+                (resolvedTab == .claudeSecondary ? secondaryUsage ?? claudeUsage : claudeUsage).currentExtraUsage)
             : nil
     }
 
@@ -162,8 +189,15 @@ struct UsageDetailView: View {
         let windowStart = calendar.date(
             byAdding: .day, value: -(costStore.windowDays - 1),
             to: calendar.startOfDay(for: today))!
+        // Pro merges into the Claude segment: combinedAcrossProviders keys segments by provider.
+        var claudeBuckets = costStore.buckets
+        for (day, models) in secondaryCostStore?.buckets ?? [:] {
+            for (model, totals) in models {
+                claudeBuckets[day, default: [:]][model, default: ModelTokenTotals()] += totals
+            }
+        }
         return DailyCostReport.combinedAcrossProviders(
-            [(.claude, costStore.buckets), (.codex, codexCostStore.buckets), (.devin, devinCostStore.buckets)],
+            [(.claude, claudeBuckets), (.codex, codexCostStore.buckets), (.devin, devinCostStore.buckets)],
             windowStart: windowStart, today: today, calendar: calendar)
     }
 
@@ -178,6 +212,14 @@ struct UsageDetailView: View {
     @ViewBuilder private var costDashboard: some View {
         let chartHeight = Self.chartHeight(showGrassIsland: showGrassIsland)
         switch resolvedTab {
+        case .claudeSecondary:
+            if let report = secondaryCostStore?.report {
+                CostDashboardView(
+                    report: report,
+                    sizingPeerReports: ([costStore.report, combinedReport] + costStoresByProvider.dropFirst().map(\.store.report))
+                        .compactMap { $0 },
+                    chartHeight: chartHeight)
+            }
         case .provider(let provider):
             CostDashboardView(
                 report: costStore(for: provider).report,
@@ -246,7 +288,7 @@ struct UsageDetailView: View {
             costDashboard
                 .padding(.bottom, showGrassIsland ? -4 : 2)
 
-            if case .provider = resolvedTab {
+            if resolvedTab != .all {
                 if Self.usesTwoColumnLayout(
                     rowCount: usageRowCount,
                     showGrassIsland: showGrassIsland,
@@ -335,9 +377,11 @@ struct UsageDetailView: View {
         return parts.joined(separator: " · ")
     }
 
-    private static func tabTitle(_ tab: UsageTab) -> String {
+    private func tabTitle(_ tab: UsageTab) -> String {
         switch tab {
+        case .provider(.claude) where secondaryUsage != nil: KeychainManager.primaryLabel ?? String(localized: "Perso")
         case .provider(let provider): provider.displayName
+        case .claudeSecondary: KeychainManager.secondaryLabel ?? String(localized: "Pro")
         case .all: String(localized: "All")
         }
     }
@@ -346,7 +390,7 @@ struct UsageDetailView: View {
         HStack(spacing: 4) {
             ForEach(tabs, id: \.self) { tab in
                 Button(action: { selectedTab = tab }) {
-                    Text(Self.tabTitle(tab))
+                    Text(tabTitle(tab))
                         .panelFont(size: 14, weight: .semibold)
                         .foregroundColor(
                             resolvedTab == tab

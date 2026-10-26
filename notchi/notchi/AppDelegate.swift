@@ -69,9 +69,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, SPUUpdaterDelegate, SP
                 NotchiStateMachine.shared.handleEvent(event)
             }
             await ClaudeUsageService.shared.startPolling()
+            await ClaudeUsageService.secondary?.startPolling()
             await CodexUsageService.shared.startPolling()
             await DevinUsageService.shared.startPolling()
             await CostHistoryStore.shared.start()
+            await CostHistoryStore.sharedSecondary?.start()
             await CostHistoryStore.sharedCodex.start()
             await CostHistoryStore.sharedDevin.start()
         }
@@ -86,6 +88,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, SPUUpdaterDelegate, SP
         globalShortcutService.stop()
         integrationCoordinator.stop()
         ClaudeUsageService.shared.stopPolling()
+        ClaudeUsageService.secondary?.stopPolling()
         CodexUsageService.shared.stopPolling()
         DevinUsageService.shared.stopPolling()
     }
@@ -203,6 +206,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, SPUUpdaterDelegate, SP
     @objc private func handleSystemWake() {
         MainActor.assumeIsolated {
             ClaudeUsageService.shared.startPolling(afterSystemWake: true)
+            ClaudeUsageService.secondary?.startPolling(afterSystemWake: true)
             Task { await CodexUsageService.shared.refreshFromAPI() }
             Task { await DevinUsageService.shared.refresh() }
         }

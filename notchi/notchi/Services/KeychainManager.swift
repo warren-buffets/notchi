@@ -1,3 +1,4 @@
+import CryptoKit
 import Foundation
 import Security
 
@@ -8,16 +9,16 @@ struct ClaudeOAuthCredentials: Equatable {
 }
 
 enum KeychainManager {
-    private static let claudeCodeService = "Claude Code-credentials"
+    static let claudeCodeService = "Claude Code-credentials"
     private static let notchiService = "com.ruban.notchi"
     private static let anthropicApiKeyAccount = "anthropicApiKey"
     private static let openAIApiKeyAccount = "openAIApiKey"
-    private static let cachedOAuthTokenAccount = "cachedOAuthToken"
+    static let cachedOAuthTokenAccount = "cachedOAuthToken"
     private static let recentCredentialCacheTTL: TimeInterval = 5
     private static let securityCLIBackoffInterval: TimeInterval = 60
     private static let credentialReadLock = NSLock()
-    private nonisolated(unsafe) static var recentCredentialCacheEntry: ClaudeCredentialCacheEntry?
-    private nonisolated(unsafe) static var lastSecurityCLIFailureAt: Date?
+    private nonisolated(unsafe) static var recentCredentialCacheEntries: [String: ClaudeCredentialCacheEntry] = [:]
+    private nonisolated(unsafe) static var lastSecurityCLIFailureAt: [String: Date] = [:]
     private static let isoFractional: ISO8601DateFormatter = {
         let formatter = ISO8601DateFormatter()
         formatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
@@ -37,13 +38,91 @@ enum KeychainManager {
     private nonisolated(unsafe) static var taskNowOverride: (() -> Date)?
     #endif
 
-    static func refreshAccessTokenSilently() -> String? {
-        guard let credentials = getOAuthCredentials(allowInteraction: false) else {
+    static func refreshAccessTokenSilently(
+        service: String = claudeCodeService,
+        cacheAccount: String = cachedOAuthTokenAccount
+    ) -> String? {
+        guard let credentials = getOAuthCredentials(allowInteraction: false, service: service) else {
             return nil
         }
-        cacheOAuthToken(credentials.accessToken)
+        cacheOAuthToken(credentials.accessToken, account: cacheAccount)
         return credentials.accessToken
     }
+
+    /// Claude Code stores each non-default CLAUDE_CONFIG_DIR under
+    /// "Claude Code-credentials-<sha256(dir) prefix>". Attribute-only query, so no ACL prompt.
+    private static func hashedClaudeServiceSuffixes() -> Set<String> {
+        let query: [String: Any] = [
+            kSecClass as String: kSecClassGenericPassword,
+            kSecReturnAttributes as String: true,
+            kSecMatchLimit as String: kSecMatchLimitAll,
+            kSecUseAuthenticationUI as String: kSecUseAuthenticationUISkip
+        ]
+        var result: AnyObject?
+        guard SecItemCopyMatching(query as CFDictionary, &result) == errSecSuccess,
+              let items = result as? [[String: Any]] else {
+            return []
+        }
+        let prefix = claudeCodeService + "-"
+        return Set(items
+            .compactMap { $0[kSecAttrService as String] as? String }
+            .filter { $0.hasPrefix(prefix) && $0.dropFirst(prefix.count).range(of: "^[0-9a-f]{8}$", options: .regularExpression) != nil }
+            .map { String($0.dropFirst(prefix.count)) })
+    }
+
+    static func secondaryClaudeCodeService() -> String? {
+        secondaryClaudeConfigDir().map { claudeCodeService + "-" + configDirHash($0.path) }
+    }
+
+    /// First 8 hex chars of sha256(path), the suffix Claude Code puts on the credentials entry.
+    static func configDirHash(_ path: String) -> String {
+        SHA256.hash(data: Data(path.utf8)).prefix(4).map { String(format: "%02x", $0) }.joined()
+    }
+
+    /// Hidden "~/.claude*" directory (other than ~/.claude) with a matching keychain entry.
+    /// UserDefaults "secondaryClaudeConfigDir" overrides; else the most recently used one wins
+    /// (Claude Code rewrites <dir>/.claude.json every session), so stale logins lose.
+    static func secondaryClaudeConfigDir(home: String = NSHomeDirectory()) -> URL? {
+        let suffixes = hashedClaudeServiceSuffixes()
+        guard !suffixes.isEmpty else { return nil }
+        let homeURL = URL(fileURLWithPath: home, isDirectory: true)
+        let names = (try? FileManager.default.contentsOfDirectory(atPath: home)) ?? []
+        let candidates = names
+            .filter { $0.hasPrefix(".claude") && $0 != ".claude" }
+            .map { homeURL.appendingPathComponent($0, isDirectory: true) }
+            .filter { url in
+                var isDir: ObjCBool = false
+                return FileManager.default.fileExists(atPath: url.path, isDirectory: &isDir) && isDir.boolValue
+                    && suffixes.contains(configDirHash(url.path))
+            }
+        if let override = UserDefaults.standard.string(forKey: "secondaryClaudeConfigDir") {
+            let path = URL(fileURLWithPath: (override as NSString).expandingTildeInPath).path
+            if let match = candidates.first(where: { $0.path == path }) { return match }
+        }
+        func lastUsed(_ url: URL) -> Date {
+            let file = url.appendingPathComponent(".claude.json").path
+            return ((try? FileManager.default.attributesOfItem(atPath: file))?[.modificationDate] as? Date) ?? .distantPast
+        }
+        return candidates.max { lastUsed($0) < lastUsed($1) }
+    }
+
+    /// "Perso" for "<email>'s Organization", "Pro" for any other organization name, nil if unknown.
+    /// configDir nil = default account (~/.claude.json).
+    static func claudeAccountLabel(configDir: URL?) -> String? {
+        let file = configDir?.appendingPathComponent(".claude.json")
+            ?? URL(fileURLWithPath: NSHomeDirectory()).appendingPathComponent(".claude.json")
+        guard let data = try? Data(contentsOf: file),
+              let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else { return nil }
+        return claudeAccountLabel(organizationName: (json["oauthAccount"] as? [String: Any])?["organizationName"] as? String)
+    }
+
+    static func claudeAccountLabel(organizationName: String?) -> String? {
+        guard let name = organizationName, !name.isEmpty else { return nil }
+        return name.hasSuffix("'s Organization") ? String(localized: "Perso") : String(localized: "Pro")
+    }
+
+    static let primaryLabel = claudeAccountLabel(configDir: nil)
+    static let secondaryLabel = claudeAccountLabel(configDir: secondaryClaudeConfigDir())
 
     // MARK: - Anthropic API Key
 
@@ -81,51 +160,51 @@ enum KeychainManager {
 
     // MARK: - Cached OAuth Token
 
-    static func getCachedOAuthToken(allowInteraction: Bool = false) -> String? {
+    static func getCachedOAuthToken(allowInteraction: Bool = false, account: String = cachedOAuthTokenAccount) -> String? {
         readString(
             service: notchiService,
-            account: cachedOAuthTokenAccount,
+            account: account,
             allowInteraction: allowInteraction
         )
     }
 
-    static func cacheOAuthToken(_ token: String) {
-        saveString(token, service: notchiService, account: cachedOAuthTokenAccount)
+    static func cacheOAuthToken(_ token: String, account: String = cachedOAuthTokenAccount) {
+        saveString(token, service: notchiService, account: account)
     }
 
-    static func clearCachedOAuthToken() {
-        deleteItem(service: notchiService, account: cachedOAuthTokenAccount)
+    static func clearCachedOAuthToken(account: String = cachedOAuthTokenAccount) {
+        deleteItem(service: notchiService, account: account)
     }
 
     // MARK: - Claude Code Credentials
 
-    static func getOAuthCredentials(allowInteraction: Bool) -> ClaudeOAuthCredentials? {
+    static func getOAuthCredentials(allowInteraction: Bool, service: String = claudeCodeService) -> ClaudeOAuthCredentials? {
         let now = currentDate()
-        if let cached = recentCredentialCache(at: now) {
+        if let cached = recentCredentialCache(service: service, at: now) {
             return cached.credentials
         }
 
         // Primary: /usr/bin/security CLI (avoids ACL dialog)
-        if shouldAttemptSecurityCLI(at: now) {
-            if let json = readClaudeCodeKeychainViaCLI(),
+        if shouldAttemptSecurityCLI(service: service, at: now) {
+            if let json = readClaudeCodeKeychainViaCLI(service: service),
                let credentials = decodeClaudeOAuthCredentials(from: json) {
-                cacheRecentCredential(credentials, source: "/usr/bin/security CLI", at: now)
-                clearSecurityCLIBackoff()
+                cacheRecentCredential(credentials, service: service, source: "/usr/bin/security CLI", at: now)
+                clearSecurityCLIBackoff(service: service)
                 return credentials
             }
-            recordSecurityCLIFailure(at: now)
+            recordSecurityCLIFailure(service: service, at: now)
         }
 
         // Fallback: Security.framework using the caller's interaction policy.
-        guard let json = readClaudeCodeKeychain(allowInteraction: allowInteraction),
+        guard let json = readClaudeCodeKeychain(allowInteraction: allowInteraction, service: service),
               let credentials = decodeClaudeOAuthCredentials(from: json) else {
             return nil
         }
-        cacheRecentCredential(credentials, source: "Security.framework", at: now)
+        cacheRecentCredential(credentials, service: service, source: "Security.framework", at: now)
         return credentials
     }
 
-    private static func readClaudeCodeKeychainViaCLI() -> [String: Any]? {
+    private static func readClaudeCodeKeychainViaCLI(service: String) -> [String: Any]? {
         #if DEBUG
         if let override = taskSecurityCLIReadOverride {
             return override()
@@ -134,7 +213,7 @@ enum KeychainManager {
 
         let process = Process()
         process.executableURL = URL(fileURLWithPath: "/usr/bin/security")
-        process.arguments = ["find-generic-password", "-s", claudeCodeService, "-w"]
+        process.arguments = ["find-generic-password", "-s", service, "-w"]
 
         let pipe = Pipe()
         process.standardOutput = pipe
@@ -161,7 +240,7 @@ enum KeychainManager {
         return json
     }
 
-    private static func readClaudeCodeKeychain(allowInteraction: Bool) -> [String: Any]? {
+    private static func readClaudeCodeKeychain(allowInteraction: Bool, service: String) -> [String: Any]? {
         #if DEBUG
         if let override = taskSecurityFrameworkReadOverride {
             return override(allowInteraction)
@@ -170,7 +249,7 @@ enum KeychainManager {
 
         var query: [String: Any] = [
             kSecClass as String: kSecClassGenericPassword,
-            kSecAttrService as String: claudeCodeService,
+            kSecAttrService as String: service,
             kSecReturnData as String: true,
             kSecMatchLimit as String: kSecMatchLimitOne
         ]
@@ -191,25 +270,25 @@ enum KeychainManager {
         return json
     }
 
-    private static func recentCredentialCache(at now: Date) -> ClaudeCredentialCacheEntry? {
+    private static func recentCredentialCache(service: String, at now: Date) -> ClaudeCredentialCacheEntry? {
         credentialReadLock.lock()
         defer { credentialReadLock.unlock() }
 
-        guard let entry = recentCredentialCacheEntry else {
+        guard let entry = recentCredentialCacheEntries[service] else {
             return nil
         }
 
         guard now.timeIntervalSince(entry.resolvedAt) <= recentCredentialCacheTTL else {
-            recentCredentialCacheEntry = nil
+            recentCredentialCacheEntries[service] = nil
             return nil
         }
 
         return entry
     }
 
-    private static func cacheRecentCredential(_ credentials: ClaudeOAuthCredentials, source: String, at now: Date) {
+    private static func cacheRecentCredential(_ credentials: ClaudeOAuthCredentials, service: String, source: String, at now: Date) {
         credentialReadLock.lock()
-        recentCredentialCacheEntry = ClaudeCredentialCacheEntry(
+        recentCredentialCacheEntries[service] = ClaudeCredentialCacheEntry(
             credentials: credentials,
             resolvedAt: now,
             source: source
@@ -217,31 +296,31 @@ enum KeychainManager {
         credentialReadLock.unlock()
     }
 
-    private static func shouldAttemptSecurityCLI(at now: Date) -> Bool {
+    private static func shouldAttemptSecurityCLI(service: String, at now: Date) -> Bool {
         credentialReadLock.lock()
         defer { credentialReadLock.unlock() }
 
-        guard let lastFailure = lastSecurityCLIFailureAt else {
+        guard let lastFailure = lastSecurityCLIFailureAt[service] else {
             return true
         }
 
         if now.timeIntervalSince(lastFailure) >= securityCLIBackoffInterval {
-            lastSecurityCLIFailureAt = nil
+            lastSecurityCLIFailureAt[service] = nil
             return true
         }
 
         return false
     }
 
-    private static func recordSecurityCLIFailure(at now: Date) {
+    private static func recordSecurityCLIFailure(service: String, at now: Date) {
         credentialReadLock.lock()
-        lastSecurityCLIFailureAt = now
+        lastSecurityCLIFailureAt[service] = now
         credentialReadLock.unlock()
     }
 
-    private static func clearSecurityCLIBackoff() {
+    private static func clearSecurityCLIBackoff(service: String) {
         credentialReadLock.lock()
-        lastSecurityCLIFailureAt = nil
+        lastSecurityCLIFailureAt[service] = nil
         credentialReadLock.unlock()
     }
 
@@ -269,8 +348,8 @@ enum KeychainManager {
 
     static func _resetCredentialResolutionStateForTesting() {
         credentialReadLock.lock()
-        recentCredentialCacheEntry = nil
-        lastSecurityCLIFailureAt = nil
+        recentCredentialCacheEntries = [:]
+        lastSecurityCLIFailureAt = [:]
         credentialReadLock.unlock()
         taskSecurityCLIReadOverride = nil
         taskSecurityFrameworkReadOverride = nil

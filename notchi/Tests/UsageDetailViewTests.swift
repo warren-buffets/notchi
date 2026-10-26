@@ -16,7 +16,9 @@ final class UsageDetailViewTests: XCTestCase {
             claudeUsage: claude, codexUsage: codex, devinUsage: DevinUsageService(readUsage: { _ in nil }),
             costStore: claudeCosts,
             codexCostStore: codexCosts, devinCostStore: CostHistoryStore(provider: .devin) { _ in [:] },
-            defaultProvider: .codex
+            defaultProvider: .codex,
+            secondaryUsage: nil,
+            secondaryCostStore: nil
         )
 
         XCTAssertFalse(codex.hasUsageData)
@@ -37,7 +39,9 @@ final class UsageDetailViewTests: XCTestCase {
             costStore: CostHistoryStore { _ in [:] },
             codexCostStore: CostHistoryStore(provider: .codex) { _ in [:] },
             devinCostStore: CostHistoryStore(provider: .devin) { _ in [:] },
-            defaultProvider: .codex
+            defaultProvider: .codex,
+            secondaryUsage: nil,
+            secondaryCostStore: nil
         )
 
         XCTAssertTrue(view.showsToggle)
@@ -52,7 +56,9 @@ final class UsageDetailViewTests: XCTestCase {
             costStore: CostHistoryStore { _ in [:] },
             codexCostStore: CostHistoryStore(provider: .codex) { _ in [:] },
             devinCostStore: CostHistoryStore(provider: .devin) { _ in [:] },
-            defaultProvider: .codex
+            defaultProvider: .codex,
+            secondaryUsage: nil,
+            secondaryCostStore: nil
         )
 
         XCTAssertTrue(view.showsUnlimitedCredits)
@@ -75,7 +81,9 @@ final class UsageDetailViewTests: XCTestCase {
             costStore: CostHistoryStore { _ in [:] },
             codexCostStore: CostHistoryStore(provider: .codex) { _ in [:] },
             devinCostStore: CostHistoryStore(provider: .devin) { _ in [:] },
-            defaultProvider: .devin
+            defaultProvider: .devin,
+            secondaryUsage: nil,
+            secondaryCostStore: nil
         )
 
         XCTAssertTrue(view.showsToggle)
@@ -97,7 +105,9 @@ final class UsageDetailViewTests: XCTestCase {
             costStore: claudeCosts,
             codexCostStore: CostHistoryStore(provider: .codex) { _ in [:] },
             devinCostStore: devinCosts,
-            defaultProvider: .devin
+            defaultProvider: .devin,
+            secondaryUsage: nil,
+            secondaryCostStore: nil
         )
 
         XCTAssertEqual(view.tabs, [.provider(.claude), .provider(.devin), .all])

@@ -249,6 +249,7 @@ struct ExpandedPanelView: View {
         usageService.hasUsageData || codexUsageService.hasUsageData || devinUsageService.hasUsageData
             || !CostHistoryStore.shared.buckets.isEmpty || !CostHistoryStore.sharedCodex.buckets.isEmpty
             || !CostHistoryStore.sharedDevin.buckets.isEmpty
+            || !(CostHistoryStore.sharedSecondary?.buckets.isEmpty ?? true)
     }
 
     private var state: NotchiState {

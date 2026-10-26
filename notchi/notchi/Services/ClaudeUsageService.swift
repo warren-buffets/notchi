@@ -55,6 +55,11 @@ struct ClaudeUsageServiceDependencies {
     var pollJitter: () -> Double
     var now: () -> Date
     var schedulePoll: @MainActor (TimeInterval, @escaping () -> Void) -> any ClaudeUsagePollTimer
+    // WHY: the secondary account must never flip the global setting nor overwrite the primary's persisted state.
+    var isUsageEnabled: () -> Bool = { AppSettings.isUsageEnabled }
+    var setUsageEnabled: (Bool) -> Void = { AppSettings.isUsageEnabled = $0 }
+    var loadExtraUsageObservation: () -> ClaudeExtraUsageObservation? = { AppSettings.claudeExtraUsageObservation }
+    var saveExtraUsageObservation: (ClaudeExtraUsageObservation?) -> Void = { AppSettings.claudeExtraUsageObservation = $0 }
 }
 
 private struct LivePollTimer: ClaudeUsagePollTimer {
@@ -677,11 +682,36 @@ extension ClaudeUsageServiceDependencies {
             return LivePollTimer(timer: timer)
         }
     )
+    static func secondary(keychainService: String) -> Self {
+        let cacheAccount = KeychainManager.cachedOAuthTokenAccount + "." + keychainService
+        var deps = live
+        deps.getOAuthTokenFromEnvironment = { nil }
+        deps.getCachedOAuthToken = { KeychainManager.getCachedOAuthToken(allowInteraction: $0, account: cacheAccount) }
+        deps.getOAuthCredentials = { KeychainManager.getOAuthCredentials(allowInteraction: $0, service: keychainService) }
+        deps.cacheOAuthToken = { KeychainManager.cacheOAuthToken($0, account: cacheAccount) }
+        deps.refreshAccessTokenSilently = {
+            KeychainManager.refreshAccessTokenSilently(service: keychainService, cacheAccount: cacheAccount)
+        }
+        deps.clearCachedOAuthToken = { KeychainManager.clearCachedOAuthToken(account: cacheAccount) }
+        // shortcut: pas d'état persisté pour le compte secondaire, un redémarrage pendant un backoff 429 repart de zéro.
+        deps.loadRecoverySnapshot = { nil }
+        deps.saveRecoverySnapshot = { _ in }
+        deps.clearRecoverySnapshot = { }
+        deps.isUsageEnabled = { true }
+        deps.setUsageEnabled = { _ in }
+        deps.loadExtraUsageObservation = { nil }
+        deps.saveExtraUsageObservation = { _ in }
+        return deps
+    }
 }
 
 @MainActor @Observable
 final class ClaudeUsageService {
     static let shared = ClaudeUsageService()
+
+    /// Second Claude account (another CLAUDE_CONFIG_DIR), nil when none is logged in on this Mac.
+    static let secondary: ClaudeUsageService? = KeychainManager.secondaryClaudeCodeService()
+        .map { ClaudeUsageService(dependencies: .secondary(keychainService: $0)) }
 
     var currentUsage: QuotaPeriod?
     var currentWeeklyUsage: QuotaPeriod?
@@ -746,7 +776,7 @@ final class ClaudeUsageService {
     }
 
     func connectAndStartPolling() {
-        AppSettings.isUsageEnabled = true
+        dependencies.setUsageEnabled(true)
         clearTransientState()
         clearOAuthBackoffState()
         restorePersistedExtraUsageObservationIfNeeded()
@@ -763,7 +793,7 @@ final class ClaudeUsageService {
                 if currentUsage != nil {
                     scheduleSelfHealRetry()
                 } else {
-                    AppSettings.isUsageEnabled = false
+                    dependencies.setUsageEnabled(false)
                 }
                 return
             }
@@ -778,7 +808,7 @@ final class ClaudeUsageService {
     }
 
     func handleClaudeResumeTrigger(_ trigger: ClaudeUsageResumeTrigger) {
-        guard AppSettings.isUsageEnabled else {
+        guard dependencies.isUsageEnabled() else {
             return
         }
 
@@ -822,13 +852,13 @@ final class ClaudeUsageService {
                     presentReconnectRequired(message: String(localized: "Claude authentication needs attention."))
                     scheduleSelfHealRetry()
                 } else {
-                    AppSettings.isUsageEnabled = false
+                    dependencies.setUsageEnabled(false)
                     clearTransientState()
                 }
                 return
             }
 
-            AppSettings.isUsageEnabled = true
+            dependencies.setUsageEnabled(true)
             cachedToken = resolution.token
 
             restorePersistedExtraUsageObservationIfNeeded()
@@ -968,7 +998,7 @@ final class ClaudeUsageService {
     }
 
     private func scheduleSelfHealRetry() {
-        guard AppSettings.isUsageEnabled else { return }
+        guard dependencies.isUsageEnabled() else { return }
         selfHealRetryTimer?.invalidate()
         selfHealRetryTimer = dependencies.schedulePoll(Self.selfHealRetryInterval) { [weak self] in
             Task { @MainActor [weak self] in
@@ -979,7 +1009,7 @@ final class ClaudeUsageService {
 
     private func attemptSelfHeal() async {
         selfHealRetryTimer = nil
-        guard AppSettings.isUsageEnabled, pollTimer == nil, !isLoading else { return }
+        guard dependencies.isUsageEnabled(), pollTimer == nil, !isLoading else { return }
 
         guard let resolution = resolveStoredAccessToken(
             allowsCredentialRecovery: true,
@@ -1292,7 +1322,7 @@ final class ClaudeUsageService {
             consecutiveRateLimits = 0
             clearOAuthBackoffState()
             isConnected = true
-            AppSettings.isUsageEnabled = true
+            dependencies.setUsageEnabled(true)
             preferHeadersFallback = false
             clearTransientState()
             currentUsage = usageResponse.fiveHour
@@ -1761,7 +1791,7 @@ final class ClaudeUsageService {
     private func performDelayedResumeReconnect(trigger: ClaudeUsageResumeTrigger) {
         pendingResumeReconnectTimer = nil
 
-        guard AppSettings.isUsageEnabled else {
+        guard dependencies.isUsageEnabled() else {
             return
         }
 
@@ -1959,12 +1989,12 @@ final class ClaudeUsageService {
     }
 
     private func restorePersistedExtraUsageObservationIfNeeded() {
-        guard let observation = AppSettings.claudeExtraUsageObservation else {
+        guard let observation = dependencies.loadExtraUsageObservation() else {
             return
         }
 
         guard isExtraUsageWindowStillValid(resetMarker: observation.extraUsageResetMarker, now: dependencies.now()) else {
-            AppSettings.claudeExtraUsageObservation = nil
+            dependencies.saveExtraUsageObservation(nil)
             return
         }
 
@@ -2009,11 +2039,11 @@ final class ClaudeUsageService {
 
     private func persistExtraUsageObservationIfNeeded() {
         guard let observation = makeExtraUsageObservation() else {
-            AppSettings.claudeExtraUsageObservation = nil
+            dependencies.saveExtraUsageObservation(nil)
             return
         }
 
-        AppSettings.claudeExtraUsageObservation = observation
+        dependencies.saveExtraUsageObservation(observation)
     }
 
     private func makeExtraUsageObservation() -> ClaudeExtraUsageObservation? {

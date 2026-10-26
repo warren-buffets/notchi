@@ -13,6 +13,17 @@ final class KeychainManagerTests: XCTestCase {
         super.tearDown()
     }
 
+    func testConfigDirHashMatchesClaudeCodeSuffix() {
+        XCTAssertEqual(KeychainManager.configDirHash("/Users/virgileader/.claude-pro"), "56dfdbb6")
+    }
+
+    func testClaudeAccountLabelRule() {
+        XCTAssertEqual(KeychainManager.claudeAccountLabel(organizationName: "a@b.com's Organization"), "Perso")
+        XCTAssertEqual(KeychainManager.claudeAccountLabel(organizationName: "Capsens"), "Pro")
+        XCTAssertNil(KeychainManager.claudeAccountLabel(organizationName: nil))
+        XCTAssertNil(KeychainManager.claudeAccountLabel(organizationName: ""))
+    }
+
     func testDecodeClaudeOAuthCredentialsWithScopesAndExpiry() throws {
         let expiresAt = "2099-01-01T01:00:00Z"
         let data = makeCredentialPayload(

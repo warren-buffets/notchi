@@ -147,6 +147,13 @@ extension CostHistoryStore {
         provider: .claude, config: .claude,
         projectsRoots: [homeURL(".claude/projects")], cacheFile: "claude.json")
 
+    /// Second Claude account's history, nil when no secondary config dir is found.
+    static let sharedSecondary: CostHistoryStore? = KeychainManager.secondaryClaudeConfigDir().map {
+        makeStore(provider: .claude, config: .claude,
+                  projectsRoots: [$0.appendingPathComponent("projects", isDirectory: true)],
+                  cacheFile: "claude-secondary.json")
+    }
+
     static let sharedCodex = makeStore(
         provider: .codex, config: .codex,
         projectsRoots: [homeURL(".codex/sessions"), homeURL(".codex/archived_sessions")],

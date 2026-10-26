@@ -5,9 +5,9 @@
 	<key>SUBundleName</key>
 	<string>Notchi</string>
 	<key>SUEnableAutomaticChecks</key>
-	<true/>
+	<false/>
 	<key>SUAutomaticallyUpdate</key>
-	<true/>
+	<false/>
 	<key>SUScheduledCheckInterval</key>
 	<integer>86400</integer>
 	<key>SUScheduledImpatientCheckInterval</key>

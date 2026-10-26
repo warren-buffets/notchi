@@ -5,6 +5,9 @@ struct UsageRingView: View {
     var diameter: CGFloat = 15
     var lineWidth: CGFloat = 3
     var isStale: Bool = false
+    /// Anneau intérieur (second compte), dessiné dans le même emplacement.
+    var inner: NotchContentView.CollapsedRingContent?
+    var innerIsStale: Bool = false
 
     @State private var drawProgress: CGFloat = 0
 
@@ -19,14 +22,31 @@ struct UsageRingView: View {
         content == .unlimited
     }
 
-    private var ringColor: Color {
+    private func color(_ percentage: Int, stale: Bool) -> Color {
         let base: Color
-        switch clampedPercentage {
+        switch percentage {
         case ..<50: base = TerminalColors.green
         case ..<80: base = TerminalColors.amber
         default: base = TerminalColors.red
         }
-        return isStale ? base.opacity(0.5) : base
+        return stale ? base.opacity(0.5) : base
+    }
+
+    private var ringColor: Color { color(clampedPercentage, stale: isStale) }
+
+    private var innerPercentage: Int? {
+        guard case .percentage(let p) = inner else { return nil }
+        return min(max(p, 0), 100)
+    }
+
+    private func ring(_ percentage: Int, color: Color, size: CGFloat, width: CGFloat, track: Double = 0.28) -> some View {
+        ZStack {
+            UsageRingArc(fraction: Double(drawProgress))
+                .stroke(color.opacity(track), style: StrokeStyle(lineWidth: width, lineCap: .butt))
+            UsageRingArc(fraction: Double(percentage) / 100 * Double(drawProgress))
+                .stroke(color, style: StrokeStyle(lineWidth: width, lineCap: .round))
+        }
+        .frame(width: size, height: size)
     }
 
     var body: some View {
@@ -38,16 +58,10 @@ struct UsageRingView: View {
                     .opacity(Double(drawProgress))
                     .accessibilityLabel(String(localized: "No spending cap"))
             } else {
-                UsageRingArc(fraction: Double(drawProgress))
-                    .stroke(
-                        ringColor.opacity(0.28),
-                        style: StrokeStyle(lineWidth: lineWidth, lineCap: .butt)
-                    )
-                UsageRingArc(fraction: Double(clampedPercentage) / 100 * Double(drawProgress))
-                    .stroke(
-                        ringColor,
-                        style: StrokeStyle(lineWidth: lineWidth, lineCap: .round)
-                    )
+                ring(clampedPercentage, color: ringColor, size: diameter, width: lineWidth)
+                if let innerPercentage {
+                    ring(innerPercentage, color: color(innerPercentage, stale: innerIsStale), size: diameter - 8.5, width: 2.5, track: 0.35)
+                }
             }
         }
         .frame(width: isUnlimited ? nil : diameter, height: diameter)
@@ -89,6 +103,8 @@ private struct UsageRingArc: Shape {
         UsageRingView(content: .percentage(95))
         UsageRingView(content: .unlimited)
         UsageRingView(content: .unlimited, isStale: true)
+        UsageRingView(content: .percentage(65), inner: .percentage(30))
+        UsageRingView(content: .percentage(90), inner: .percentage(55), innerIsStale: true)
     }
     .padding()
     .background(Color.black)
